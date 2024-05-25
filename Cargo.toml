@@ -1,0 +1,11 @@
+# Just a virtual workspace to group all the crates together
+
+workspace.resolver = "2"
+workspace.members = [
+  "bpf-fs-events",
+  "bpf-fs-events-cli",
+  "bpf-fs-events-sock",
+]
+
+[profile.dev]
+debug = 1

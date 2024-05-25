@@ -1,0 +1,8 @@
+[package]
+name = "bpf-fs-events-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bpf-fs-events = { path = "../bpf-fs-events" }
+ctrlc = "3.4.4"

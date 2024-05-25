@@ -1,0 +1,8 @@
+[package]
+name = "bpf-fs-events-sock"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bpf-fs-events = { path = "../bpf-fs-events" }
+clap = { version = "4", features = ["derive"] }
