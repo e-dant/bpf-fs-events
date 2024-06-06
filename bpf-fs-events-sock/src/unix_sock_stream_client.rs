@@ -1,7 +1,7 @@
-use bpf_fs_events_sock::limits::BUF_MAX;
-use crate::limits::BUF_MAX;
 use std::io::Read;
 use std::io::Write;
+
+const BUF_MAX: usize = 4096 * 2;
 
 pub struct Client {
     read_buf: [u8; BUF_MAX],

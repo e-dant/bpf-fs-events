@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::io::Write;
-use crate::event_parsing::event_str;
-use crate::limits::BUF_MAX;
+
+const BUF_MAX: usize = 4096 * 2;
 
 pub struct Server<'a> {
     clients: Vec<std::os::unix::net::UnixStream>,
@@ -10,6 +10,7 @@ pub struct Server<'a> {
     removed_tx: std::sync::mpsc::Sender<usize>,
     removed_rx: std::sync::mpsc::Receiver<usize>,
     watcher: bpf_fs_events::FsEvents<'a>,
+    event_serializer: fn(bpf_fs_events::Event) -> Vec<u8>,
     _accept_task: std::thread::JoinHandle<()>,
 }
 
@@ -22,7 +23,34 @@ impl Drop for Server<'_> {
 }
 
 impl Server<'_> {
-    fn spawn_accept_task(sock_path: String, accepted_tx: std::sync::mpsc::Sender<std::os::unix::net::UnixStream>) -> std::thread::JoinHandle<()> {
+    pub fn try_new(
+            sock_path: &str,
+            event_serializer: fn(bpf_fs_events::Event) -> Vec<u8>,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+        if std::fs::metadata(sock_path).is_ok() {
+            std::fs::remove_file(sock_path)?;
+        }
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+        let (removed_tx, removed_rx) = std::sync::mpsc::channel();
+        let accept_task = Self::spawn_accept_task(sock_path.to_string(), accepted_tx);
+        let clients = Vec::new();
+        let watcher = bpf_fs_events::FsEvents::try_new()?;
+        Ok(Self {
+            clients,
+            sock_path: sock_path.to_string(),
+            accepted_rx,
+            removed_tx,
+            removed_rx,
+            watcher,
+            event_serializer,
+            _accept_task: accept_task,
+        })
+    }
+
+    fn spawn_accept_task(
+        sock_path: String,
+        accepted_tx: std::sync::mpsc::Sender<std::os::unix::net::UnixStream>,
+    ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let srv = std::os::unix::net::UnixListener::bind(sock_path).unwrap();
             srv.set_nonblocking(false).unwrap();
@@ -46,35 +74,11 @@ impl Server<'_> {
                             },
                             Err(e) => eprintln!("read error: {}", e),
                         }
-                        /*
-                        stream.read(&mut buf).unwrap();
-                        eprintln!("client said: {}", std::str::from_utf8(&buf).unwrap());
-                        */
                         accepted_tx.send(stream).unwrap();
                     }
                     Err(e) => eprintln!("accept error: {}", e),
                 }
             }
-        })
-    }
-
-    pub fn try_new(sock_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        if std::fs::metadata(sock_path).is_ok() {
-            std::fs::remove_file(sock_path)?;
-        }
-        let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
-        let (removed_tx, removed_rx) = std::sync::mpsc::channel();
-        let accept_task = Self::spawn_accept_task(sock_path.to_string(), accepted_tx);
-        let clients = Vec::new();
-        let watcher = bpf_fs_events::FsEvents::try_new()?;
-        Ok(Self {
-            clients,
-            sock_path: sock_path.to_string(),
-            accepted_rx,
-            removed_tx,
-            removed_rx,
-            watcher,
-            _accept_task: accept_task,
         })
     }
 
@@ -86,10 +90,9 @@ impl Server<'_> {
             self.clients.remove(client);
         }
         if let Some(event) = self.watcher.poll_indefinite()? {
-            let msg = event_str(event);
-            let msg = msg.as_bytes();
+            let msg = (self.event_serializer)(event);
             for idx in 0..self.clients.len() {
-                match self.clients[idx].write_all(msg) {
+                match self.clients[idx].write_all(&msg) {
                     Ok(_) => (),
                     Err(e) => match e.kind() {
                         std::io::ErrorKind::BrokenPipe => {

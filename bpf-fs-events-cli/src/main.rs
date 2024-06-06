@@ -1,6 +1,24 @@
-extern crate bpf_fs_events;
+use clap::Parser;
+use bpf_fs_events_sock::Client;
+use bpf_fs_events_sock::Server;
 
-fn show_event(event: bpf_fs_events::Event) {
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+enum Role {
+    Server,
+    Client,
+    Stdio,
+}
+
+#[derive(clap::Parser)]
+#[command(name = "bpf-fs-events")]
+struct Cli {
+    #[arg(short, long, default_value = "/var/run/fs-events")]
+    sockpath: String,
+    #[arg(value_enum, short, long, default_value = "stdio")]
+    role: Role,
+}
+
+fn event_to_string(event: bpf_fs_events::Event) -> String {
     use bpf_fs_events::EffectType;
     use bpf_fs_events::PathType;
     let et = match event.effect_type {
@@ -26,20 +44,53 @@ fn show_event(event: bpf_fs_events::Event) {
     let pn = event.pathname;
     let hdr = format!("@ {ts} {et} {pt} pid:{pid}");
     if let Some(associated) = event.associated {
-        println!("{hdr}\n> {pn}\n> {associated}");
+        format!("{hdr}\n> {pn}\n> {associated}")
     } else {
-        println!("{hdr}\n> {pn}");
+        format!("{hdr}\n> {pn}")
     }
 }
 
+fn event_to_bytes(event: bpf_fs_events::Event) -> Vec<u8> {
+    event_to_string(event).into_bytes()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ctrlc::set_handler(|| std::process::exit(0))?;
-    let watcher = bpf_fs_events::FsEvents::try_new()?;
-    loop {
-        match watcher.poll_indefinite() {
-            Err(e) => return Err(format!("{:?}", e).into()),
-            Ok(Some(event)) => show_event(event),
-            Ok(None) => (),
+    let args = Cli::parse();
+    match args.role {
+        Role::Server => {
+            let mut server = Server::try_new(args.sockpath.as_str(), event_to_bytes)?;
+            loop {
+                match server.try_send_fs_events_blocking() {
+                    Ok(_) => (),
+                    Err(e) => return Err(Box::new(std::io::Error::new(e, "server"))),
+                }
+            }
+        }
+        Role::Client => {
+            let mut client = Client::try_new(args.sockpath.as_str())?;
+            loop {
+                match client.try_read() {
+                    Ok(msg) => println!("{}", msg),
+                    Err(std::io::ErrorKind::WouldBlock) => continue,
+                    Err(std::io::ErrorKind::ConnectionReset) => {
+                        eprintln!("connection reset");
+                        return Ok(());
+                    }
+                    Err(e) => return Err(Box::new(std::io::Error::new(e, "client"))),
+                }
+            }
+        }
+        Role::Stdio => {
+            ctrlc::set_handler(|| std::process::exit(0))?;
+            let watcher = bpf_fs_events::FsEvents::try_new()?;
+            loop {
+                match watcher.poll_indefinite() {
+                    Err(e) => return Err(format!("{:?}", e).into()),
+                    Ok(Some(event)) => println!("{}", event_to_string(event)),
+                    Ok(None) => (),
+                }
+            }
         }
     }
 }
+

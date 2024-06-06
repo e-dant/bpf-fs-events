@@ -48,12 +48,10 @@ impl LnList {
     fn link_when_files_differ(&self) -> Result<(), std::io::Error> {
         let differs = try_file_content_differs(&self.from, &self.to);
         match differs {
-            Err(DiffError::File1Read) => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("Link source file not found: {}", self.from),
-                ))
-            }
+            Err(DiffError::File1Read) => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Link source file not found: {}", self.from),
+            )),
             Ok(false) => Ok(()),
             _ => {
                 std::fs::remove_file(&self.to).ok();
