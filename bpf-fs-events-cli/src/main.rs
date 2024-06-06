@@ -1,6 +1,6 @@
-use clap::Parser;
 use bpf_fs_events_sock::Client;
 use bpf_fs_events_sock::Server;
+use clap::Parser;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 enum Role {
@@ -41,12 +41,11 @@ fn event_to_string(event: bpf_fs_events::Event) -> String {
     };
     let ts = event.timestamp;
     let pid = event.pid;
-    let pn = event.pathname;
-    let hdr = format!("@ {ts} {et} {pt} pid:{pid}");
+    let pn = event.path_name;
     if let Some(associated) = event.associated {
-        format!("{hdr}\n> {pn}\n> {associated}")
+        format!("@ {ts} {et} {pt} pid:{pid}\n> {pn}\n> {associated}")
     } else {
-        format!("{hdr}\n> {pn}")
+        format!("@ {ts} {et} {pt} pid:{pid}\n> {pn}")
     }
 }
 
@@ -70,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut client = Client::try_new(args.sockpath.as_str())?;
             loop {
                 match client.try_read() {
-                    Ok(msg) => println!("{}", msg),
+                    Ok(msg) => println!("{msg}"),
                     Err(std::io::ErrorKind::WouldBlock) => continue,
                     Err(std::io::ErrorKind::ConnectionReset) => {
                         eprintln!("connection reset");
@@ -93,4 +92,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
-

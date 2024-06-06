@@ -81,7 +81,7 @@ impl From<MaybeUninit<u8>> for EffectType {
 }
 
 pub struct EventFragment {
-    pub pathname: String,
+    pub path_name: String,
     pub timestamp: u64,
     pub pid: u32,
     pub path_type: PathType,
@@ -89,7 +89,7 @@ pub struct EventFragment {
 }
 
 pub struct Event {
-    pub pathname: String,
+    pub path_name: String,
     pub associated: Option<String>,
     pub timestamp: u64,
     pub pid: u32,
@@ -104,13 +104,13 @@ enum Continuation {
 }
 
 struct PartialPaths {
-    pathnames: std::collections::VecDeque<String>,
+    path_names: std::collections::VecDeque<String>,
     associated: std::collections::VecDeque<String>,
     event_group_id: u16,
     state: Continuation,
 }
 
-fn pathname_from_bpf_event(event: &RawEvent) -> &str {
+fn path_name_from_bpf_event(event: &RawEvent) -> &str {
     let len = event.buf_len as usize;
     let buf = event.buf.as_ptr() as *const u8;
     let span = unsafe { std::slice::from_raw_parts(buf, len) };
@@ -120,14 +120,14 @@ fn pathname_from_bpf_event(event: &RawEvent) -> &str {
 impl PartialPaths {
     const fn new() -> Self {
         Self {
-            pathnames: std::collections::VecDeque::new(),
+            path_names: std::collections::VecDeque::new(),
             associated: std::collections::VecDeque::new(),
             event_group_id: 0,
             state: Continuation::Pending,
         }
     }
 
-    fn deque_to_pathname(deque: &std::collections::VecDeque<String>) -> String {
+    fn deque_to_path_name(deque: &std::collections::VecDeque<String>) -> String {
         deque
             .iter()
             .fold(String::with_capacity(256), |path, part| path + "/" + part)
@@ -135,15 +135,15 @@ impl PartialPaths {
 
     // If the group ID of the "next" event differs from whatever we stored
     // before, we'll clear out what we have and start a new group.
-    // If the event is a continuation, we'll add the pathname to the list.
+    // If the event is a continuation, we'll add the path_name to the list.
     // Unless the continuation event is the root directory and belongs to
     // the same group as the previous event. In that case, we're
-    // associating the "next" pathnames with what we have stored.
+    // associating the "next" path_names with what we have stored.
     // (Such as rename to-and-from, or link to-and-from.)
     fn continue_with(&mut self, event: &RawEvent) -> Option<Event> {
         let groupdiff = event.event_group_id != self.event_group_id;
         if groupdiff {
-            self.pathnames.clear();
+            self.path_names.clear();
             self.associated.clear();
             self.event_group_id = event.event_group_id;
         }
@@ -155,23 +155,23 @@ impl PartialPaths {
                 None
             }
             EffectType::Cont => {
-                let pathname = pathname_from_bpf_event(event);
+                let path_name = path_name_from_bpf_event(event);
                 match self.associated.len() {
-                    0 => self.pathnames.push_front(pathname.to_string()),
-                    _ => self.associated.push_front(pathname.to_string()),
+                    0 => self.path_names.push_front(path_name.to_string()),
+                    _ => self.associated.push_front(path_name.to_string()),
                 }
                 self.state = Continuation::Pending;
                 None
             }
             _ => {
                 self.state = Continuation::Complete;
-                let pathname = Self::deque_to_pathname(&self.pathnames);
+                let path_name = Self::deque_to_path_name(&self.path_names);
                 let associated = match &self.associated.len() {
                     0 => None,
-                    _ => Some(Self::deque_to_pathname(&self.associated)),
+                    _ => Some(Self::deque_to_path_name(&self.associated)),
                 };
                 Some(Event {
-                    pathname,
+                    path_name,
                     associated,
                     timestamp: event.timestamp,
                     pid: event.pid,

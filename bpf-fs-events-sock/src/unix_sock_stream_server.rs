@@ -24,26 +24,23 @@ impl Drop for Server<'_> {
 
 impl Server<'_> {
     pub fn try_new(
-            sock_path: &str,
-            event_serializer: fn(bpf_fs_events::Event) -> Vec<u8>,
-        ) -> Result<Self, Box<dyn std::error::Error>> {
+        sock_path: &str,
+        event_serializer: fn(bpf_fs_events::Event) -> Vec<u8>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         if std::fs::metadata(sock_path).is_ok() {
             std::fs::remove_file(sock_path)?;
         }
         let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
         let (removed_tx, removed_rx) = std::sync::mpsc::channel();
-        let accept_task = Self::spawn_accept_task(sock_path.to_string(), accepted_tx);
-        let clients = Vec::new();
-        let watcher = bpf_fs_events::FsEvents::try_new()?;
         Ok(Self {
-            clients,
+            clients: Vec::new(),
             sock_path: sock_path.to_string(),
             accepted_rx,
             removed_tx,
             removed_rx,
-            watcher,
+            watcher: bpf_fs_events::FsEvents::try_new()?,
             event_serializer,
-            _accept_task: accept_task,
+            _accept_task: Self::spawn_accept_task(sock_path.to_string(), accepted_tx),
         })
     }
 
