@@ -1,4 +1,3 @@
-mod memlock_rlimit;
 mod skel_watcher;
 use core::time::Duration;
 use libbpf_rs::skel::OpenSkel;
@@ -141,8 +140,8 @@ impl PartialPaths {
     // associating the "next" path_names with what we have stored.
     // (Such as rename to-and-from, or link to-and-from.)
     fn continue_with(&mut self, event: &RawEvent) -> Option<Event> {
-        let groupdiff = event.event_group_id != self.event_group_id;
-        if groupdiff {
+        let groups_differ = event.event_group_id != self.event_group_id;
+        if groups_differ {
             self.path_names.clear();
             self.associated.clear();
             self.event_group_id = event.event_group_id;
@@ -190,37 +189,60 @@ pub struct FsEvents<'cls> {
     rx: std::sync::mpsc::Receiver<Event>,
 }
 
-impl FsEvents<'_> {
-    pub fn try_new() -> Result<Self, Box<dyn std::error::Error>> {
-        memlock_rlimit::bump_memlock_rlimit()?;
+fn bump_memlock_rlimit() -> Result<(), std::io::Error> {
+    let hard = rlimit::Resource::MEMLOCK.get_hard()?;
+    let target = core::cmp::min(hard, 128 << 20); // 128^4/2
+    rlimit::Resource::MEMLOCK.set(target, hard)?;
+    Ok(())
+}
 
+fn open_skel_interface<'a>() -> Result<WatcherSkel<'a>, Box<dyn std::error::Error>> {
+    let skel_builder = if cfg!(debug_assertions) {
         let mut skel = WatcherSkelBuilder::default();
-        //skel.obj_builder.debug(true);
-        let mut skel = skel.open()?.load()?;
-        skel.attach()?;
+        skel.obj_builder.debug(true);
+        skel
+    } else {
+        WatcherSkelBuilder::default()
+    };
+    let mut skel = skel_builder.open()?.load()?;
+    skel.attach()?;
+    Ok(skel)
+}
 
-        let mut maps = skel.maps_mut();
-
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        let mut path_parsing_state = PartialPaths::new();
-        let on_event = move |data: &[u8]| {
-            let event = match plain::from_bytes(data) {
-                Ok(event) => event,
-                Err(_) => return 1,
-            };
-            let next_state = path_parsing_state.continue_with(event);
-            if let Some(completed) = next_state {
-                if tx.send(completed).is_err() {
-                    return 1;
+fn accumulating_event_handler(tx: std::sync::mpsc::Sender<Event>) -> impl FnMut(&[u8]) -> i32 {
+    let mut path_parsing_state = PartialPaths::new();
+    move |data: &[u8]| {
+        let event = match plain::from_bytes(data) {
+            Ok(event) => event,
+            // Big oops, unexpected event format, mismatch between BPF and Rust types
+            Err(_) => return 1,
+        };
+        // Event paths may be sent in pieces. Accumulating them here...
+        let next_state = path_parsing_state.continue_with(event);
+        match next_state {
+            // Holding back until we have something meaningful
+            None => 0,
+            // Sending them along when we do
+            Some(completed) => {
+                match tx.send(completed) {
+                    Ok(_) => 0,
+                    // If the receiver has not been dropped, of course.
+                    Err(_) => 1,
                 }
             }
-            0
-        };
-        let mut ringbuf = libbpf_rs::RingBufferBuilder::new();
-        ringbuf.add(maps.events(), on_event)?;
-        let ringbuf = ringbuf.build()?;
+        }
+    }
+}
 
+impl FsEvents<'_> {
+    pub fn try_new() -> Result<Self, Box<dyn std::error::Error>> {
+        bump_memlock_rlimit()?;
+        let mut skel = open_skel_interface()?;
+        let mut maps = skel.maps_mut();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut ringbuf = libbpf_rs::RingBufferBuilder::new();
+        ringbuf.add(maps.events(), accumulating_event_handler(tx))?;
+        let ringbuf = ringbuf.build()?;
         Ok(Self {
             _skel: skel,
             ringbuf,
