@@ -6,6 +6,7 @@ const BUF_MAX: usize = 4096 * 2;
 pub struct Server<'a> {
     clients: Vec<std::os::unix::net::UnixStream>,
     sock_path: String,
+    pid_path: String,
     accepted_rx: std::sync::mpsc::Receiver<std::os::unix::net::UnixStream>,
     removed_tx: std::sync::mpsc::Sender<usize>,
     removed_rx: std::sync::mpsc::Receiver<usize>,
@@ -17,7 +18,10 @@ pub struct Server<'a> {
 impl Drop for Server<'_> {
     fn drop(&mut self) {
         if let Err(e) = std::fs::remove_file(&self.sock_path) {
-            eprintln!("error removing socket: {}", e);
+            eprintln!("error removing socket file: {}", e);
+        }
+        if let Err(e) = std::fs::remove_file(&self.pid_path) {
+            eprintln!("error removing pid file: {}", e);
         }
     }
 }
@@ -27,14 +31,37 @@ impl Server<'_> {
         sock_path: &str,
         event_serializer: fn(bpf_fs_events::Event) -> Vec<u8>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        if std::fs::metadata(sock_path).is_ok() {
-            std::fs::remove_file(sock_path)?;
+        let pid_path = format!("{sock_path}.pid");
+        if let Ok(pid) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid.parse::<i32>() {
+                eprintln!("killing existing server process at pid {pid}");
+                unsafe {
+                    use libc::*;
+                    if kill(pid, SIGTERM) != 0 {
+                        match *__errno_location() {
+                            ESRCH => (),
+                            errno => {
+                                return Err(format!("error killing pid {pid}, errno {errno}").into())
+                            }
+                        }
+                    }
+                }
+            } else {
+                eprintln!("ignoring pidfile with invalid pid at {pid_path}");
+            }
         }
+        for path in &[sock_path, &pid_path] {
+            if std::fs::metadata(path).is_ok() {
+                std::fs::remove_file(path)?;
+            }
+        }
+        std::fs::write(&pid_path, std::process::id().to_string())?;
         let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
         let (removed_tx, removed_rx) = std::sync::mpsc::channel();
         Ok(Self {
             clients: Vec::new(),
             sock_path: sock_path.to_string(),
+            pid_path,
             accepted_rx,
             removed_tx,
             removed_rx,

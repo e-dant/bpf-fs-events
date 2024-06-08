@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 bpf-fs-events = { path = "../bpf-fs-events" }
+libc = "0"

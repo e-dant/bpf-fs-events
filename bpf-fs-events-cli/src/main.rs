@@ -2,6 +2,14 @@ use bpf_fs_events_sock::Client;
 use bpf_fs_events_sock::Server;
 use clap::Parser;
 
+const SOCK_PATH_DEFAULT: &str = concat!(
+    "/var/run/fs-events.v",
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    "-",
+    env!("CARGO_PKG_VERSION_MINOR"),
+    ".sock"
+);
+
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 enum Role {
     Server,
@@ -12,7 +20,7 @@ enum Role {
 #[derive(clap::Parser)]
 #[command(name = "bpf-fs-events")]
 struct Cli {
-    #[arg(short, long, default_value = "/var/run/fs-events")]
+    #[arg(short, long, default_value = SOCK_PATH_DEFAULT)]
     sockpath: String,
     #[arg(value_enum, short, long, default_value = "stdio")]
     role: Role,

@@ -195,7 +195,7 @@ impl FsEvents<'_> {
         memlock_rlimit::bump_memlock_rlimit()?;
 
         let mut skel = WatcherSkelBuilder::default();
-        skel.obj_builder.debug(true);
+        //skel.obj_builder.debug(true);
         let mut skel = skel.open()?.load()?;
         skel.attach()?;
 
