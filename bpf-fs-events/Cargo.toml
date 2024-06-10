@@ -4,11 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+env_logger = "0.11.3"
 libbpf-rs = "0.23.2"
 libc = "0.2.155"
+log = "0.4.21"
 plain = "0.2.3"
 rlimit = "0.10.1"
 structopt = "0.3.26"
+
+[features]
+default = ["ev-array"]
+ev-ringbuf = []
+ev-array = []
 
 # Linking statically appears to be broken,
 # so we'll use the dynamic library for now.

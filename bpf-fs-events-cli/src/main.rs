@@ -34,8 +34,8 @@ fn event_to_string(event: bpf_fs_events::Event) -> String {
         EffectType::Rename => "rename",
         EffectType::Link => "link",
         EffectType::Delete => "delete",
-        EffectType::Cont => "unexpected:cont",
-        EffectType::Assoc => "unexpected:assoc",
+        EffectType::Continuation => "unexpected:cont",
+        EffectType::Association => "unexpected:assoc",
     };
     let pt = match event.path_type {
         PathType::Dir => "dir",
@@ -44,7 +44,7 @@ fn event_to_string(event: bpf_fs_events::Event) -> String {
         PathType::Hardlink => "hardlink",
         PathType::Blockdev => "blockdev",
         PathType::Socket => "socket",
-        PathType::Cont => "unexpected:cont",
+        PathType::Continuation => "unexpected:cont",
         PathType::Unknown => "unexpected:unknown",
     };
     let ts = event.timestamp;
@@ -62,6 +62,7 @@ fn event_to_bytes(event: bpf_fs_events::Event) -> Vec<u8> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
     let args = Cli::parse();
     match args.role {
         Role::Server => {
@@ -80,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(msg) => println!("{msg}"),
                     Err(std::io::ErrorKind::WouldBlock) => continue,
                     Err(std::io::ErrorKind::ConnectionReset) => {
-                        eprintln!("connection reset");
+                        log::info!("connection reset");
                         return Ok(());
                     }
                     Err(e) => return Err(Box::new(std::io::Error::new(e, "client"))),

@@ -5,4 +5,6 @@ edition = "2021"
 
 [dependencies]
 bpf-fs-events = { path = "../bpf-fs-events" }
+env_logger = "0.11.3"
 libc = "0"
+log = "0.4.21"

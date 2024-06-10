@@ -15,8 +15,6 @@
     Perf buf is better without dentry_path_raw because we don't need to create a bunch
     of sub-events for each path component. Worse if we ever get dentry_path_raw. */
 #define USE_BPF_RINGBUF 0
-/*  If true, we'll force alignment of the event buffer on an 8 byte boundary by using u64 items. */
-#define USE_ALIGNED_BUF 1
 
 /*  NAME_MAX is a reasonable name length limit from 'fs/ext4/ext4.h'.
     Except, this is 256, not 255, because we want to align on 8-byte
@@ -38,21 +36,13 @@
     stick with the common PT_MAX limit for now.
 */
 #define NAME_MAX 256
-#if USE_BPF_RINGBUF
 #define SUBPATH_DEPTH_MAX 128
-#else
-#define SUBPATH_DEPTH_MAX 64 // Stack space.
-#endif
-#define PATH_MAX 256//4096
-#if USE_ALIGNED_BUF
+#define COMMON_PATH_MAX 256//4096
 #if USE_BPF_RINGBUF
-#define RINGBUF_ITEMS_MAX (PATH_MAX * 32)
-#define EVENT_BUF_MAX (NAME_MAX / sizeof(u64))
+#define RINGBUF_ITEMS_MAX (COMMON_PATH_MAX * 32)
+#define ALIGNED_EVENT_BUF_MAX (NAME_MAX / sizeof(u64))
 #else
-#define EVENT_BUF_MAX (PATH_MAX / sizeof(u64))
-#endif
-#else
-#define EVENT_BUF_MAX PATH_MAX
+#define ALIGNED_EVENT_BUF_MAX (COMMON_PATH_MAX / sizeof(u64))
 #endif
 
 #define U32_MAX 0xFFFFFFFF
@@ -132,7 +122,6 @@ static const u8 ET_CONT = 4;
 static const u8 ET_ASSOC = 5;
 
 /*  pahole is our friend.
-    Output for ringbuf+aligned buf cfg:
     struct event {
       u64 timestamp;      //     0     8
       u32 pid;            //     8     4
@@ -155,17 +144,8 @@ struct event {
     u8 path_type;
     /*  Explicit padding for the gap of 6 bytes. */
     u8 _pad[6];
-#if USE_ALIGNED_BUF
-    u64 buf[EVENT_BUF_MAX];
-#else
-    char buf[EVENT_BUF_MAX];
-#endif
-#if !USE_BPF_RINGBUF
-    /*  Offsets for the path components.
-        Logic of reversing iteration is a bit too hefty for this program.
-        We have limited stack space, temporaries will eat away at that. */
-    u8 name_offsets[SUBPATH_DEPTH_MAX];
-#endif
+    /*  We'll align the buffer on an 8 byte boundary. */
+    u64 buf[ALIGNED_EVENT_BUF_MAX];
 } exposed_in_btf(event);
 
 #if USE_BPF_RINGBUF
@@ -288,7 +268,7 @@ static __always_inline u32 resolve_dents_to_events(
     dlog("@%lu et: %d pt: %d", timestamp, effect_type, path_type);
     struct event* event = event_init(effect_type, path_type, timestamp);
     if (! event) return 0;
-    dentry_path_raw(head, (char*)event->buf, EVENT_BUF_MAX);
+    dentry_path_raw(head, (char*)event->buf, ALIGNED_EVENT_BUF_MAX);
     return 0;
 #elif USE_BPF_RINGBUF
     u8 depth = 0;
@@ -337,7 +317,7 @@ static __always_inline u32 resolve_dents_to_events(
         event->buf_len = len;
         ev_map_submit(event, BPF_RB_NO_WAKEUP);
 
-        if (total_len + parent_name.len > PATH_MAX) {
+        if (total_len + parent_name.len > COMMON_PATH_MAX) {
             elog("Path too large, must truncate");
             break;
         }
@@ -352,49 +332,41 @@ static __always_inline u32 resolve_dents_to_events(
     u8 path_type = guess_path_type == PT_UNKNOWN ? path_type_from_dentry(head) : guess_path_type;
     struct event event = event_init(effect_type, path_type, timestamp);
     u8 depth = 0;
+    u16 total_len = 0;
+    u16 space_left = COMMON_PATH_MAX - 1;
 #pragma unroll
     for (; depth < SUBPATH_DEPTH_MAX; ++depth) {
         struct dentry* parent;
         struct qstr head_name;
         struct qstr parent_name;
+
         if (read_ptr(&parent, &head->d_parent)) return 0;
         if (read_concrete(&head_name, &head->d_name)) return 0;
         if (read_concrete(&parent_name, &parent->d_name)) return 0;
         if (parent == head) {
-            tlog("Reached root at depth %d with name %s",
-                 depth,
-                 head_name.name);
+            tlog("Reached root at depth %d", depth);
             break;
         }
-        u8 clamped_head_name_len = head_name.len;
-// Evidently half of our NAME_MAX (which is the same as our PATH_MAX for the perf array, re. stack size). Why?
-#define BPF_VERIFIER_MAGIC_NUMBER 128
-        if (clamped_head_name_len > NAME_MAX - BPF_VERIFIER_MAGIC_NUMBER) {
-            // What's ever more strange, is that removing this log...
-            wlog("Truncating path component to please BPF verifier");
-            clamped_head_name_len = NAME_MAX - BPF_VERIFIER_MAGIC_NUMBER;
-        }
-        if (event.buf_len > PATH_MAX - BPF_VERIFIER_MAGIC_NUMBER) {
-            // ... and/or this log will cause the verifier to fail.
-            wlog("Truncating full path to please BPF verifier");
-            event.buf_len = PATH_MAX - BPF_VERIFIER_MAGIC_NUMBER;
-        }
-        char* buf_at_next_path_offset = (char*)event.buf;
-        buf_at_next_path_offset += event.buf_len;
-        event.name_offsets[SUBPATH_DEPTH_MAX - depth - 1] = event.buf_len;
-        event.buf_len += clamped_head_name_len;
-        //tlog("event buf len: %d", event.buf_len);
-        if (read_len(buf_at_next_path_offset, clamped_head_name_len, head_name.name)) {
+
+        event.buf_len = total_len;
+        event.buf_len &= (COMMON_PATH_MAX - 1);
+
+        space_left = COMMON_PATH_MAX - event.buf_len;
+
+        u64* buf_at_offset = event.buf;
+        buf_at_offset += event.buf_len;
+
+        u32 clamped_head_name_len = head_name.len;
+        clamped_head_name_len &= space_left;
+
+        total_len += clamped_head_name_len;
+
+        if (read_len(buf_at_offset, clamped_head_name_len, head_name.name)) {
             elog("Failed to read dentry name");
             return 0;
         }
-        tlog("event buf len: %d, clamped head name len: %d, head name len: %d, head name: %s, event buf: %s",
-             event.buf_len,
-             clamped_head_name_len,
-             head_name.len,
-             head_name.name,
-             event.buf);
-        if (event.buf_len + parent_name.len > PATH_MAX) {
+        tlog("event buf len: %d, total len: %d, space left: %d, clamped head name len: %d, event buf: %s", event.buf_len, total_len, space_left, clamped_head_name_len, event.buf);
+        if (total_len + parent_name.len > COMMON_PATH_MAX) {
             elog("Path too large, must truncate");
             break;
         }
