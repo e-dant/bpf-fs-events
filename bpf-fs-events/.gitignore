@@ -1,3 +1,4 @@
 include/vmlinux/host
 src/skel_watcher.rs
 src/bpf/vmlinux.h
+*.o
