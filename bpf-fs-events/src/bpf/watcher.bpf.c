@@ -12,11 +12,15 @@
 /*  Stub for if the kernel ever supports this ksym. As of v6ish, it doesn't. */
 #define USE_DENTRY_PATH_RAW 0
 /*  We can either use a ringbuf or a perf buf.
-    Perf buf is better without dentry_path_raw because we don't need to create a bunch
-    of sub-events for each path component. Worse if we ever get dentry_path_raw. */
+    Perf buf is better without dentry_path_raw because we don't need to create a
+    bunch of sub-events for each path component. Worse if we ever get
+    dentry_path_raw. */
 #define USE_BPF_RINGBUF 0
-/*  If true, we'll force alignment of the event buffer on an 8 byte boundary by using u64 items. */
+/*  If true, we'll force alignment of the event buffer on an 8 byte boundary by
+    using u64 items. */
 #define USE_ALIGNED_BUF 1
+/*  If true, we'll use a fake heap to store events larger than our stack. */
+#define USE_FAKE_HEAP 1
 
 /*  NAME_MAX is a reasonable name length limit from 'fs/ext4/ext4.h'.
     Except, this is 256, not 255, because we want to align on 8-byte
@@ -35,15 +39,14 @@
     tool could probably be undetected under a path longer than PT_MAX.
     (They could also be undetected if we aren't efficient enough to
     catch all the events, or if the kernel drops something.) So, we'll
-    stick with the common PT_MAX limit for now.
-*/
+    stick with the common PT_MAX limit for now. */
 #define NAME_MAX 256
 #if USE_BPF_RINGBUF
 #define SUBPATH_DEPTH_MAX 128
 #else
-#define SUBPATH_DEPTH_MAX 64 // Stack space.
+#define SUBPATH_DEPTH_MAX 64  // Stack space.
 #endif
-#define PATH_MAX 256//4096
+#define PATH_MAX 256 * 2      // 4096
 #if USE_ALIGNED_BUF
 #if USE_BPF_RINGBUF
 #define RINGBUF_ITEMS_MAX (PATH_MAX * 32)
@@ -106,7 +109,8 @@
 #endif
 
 #if USE_DENTRY_PATH_RAW
-extern void dentry_path_raw(struct dentry* dentry, char* buf, u32 buf_len) __ksym;
+extern void
+dentry_path_raw(struct dentry* dentry, char* buf, u32 buf_len) __ksym;
 #endif
 
 // For 'preserve_access_index'
@@ -160,7 +164,7 @@ struct event {
 #else
     char buf[EVENT_BUF_MAX];
 #endif
-#if !USE_BPF_RINGBUF
+#if ! USE_BPF_RINGBUF
     /*  Offsets for the path components.
         Logic of reversing iteration is a bit too hefty for this program.
         We have limited stack space, temporaries will eat away at that. */
@@ -176,9 +180,20 @@ struct {
 #else
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
-    __uint(key_size, sizeof(u32));
-    __uint(value_size, sizeof(u32));
+    __type(key, u32);
+    __type(value, u32);
 } events SEC(".maps");
+#if USE_FAKE_HEAP
+/*  A "heap" so that we can work with events larger than our stack space.
+    As of writing, for the linux 6-ish kernel, stack is 512 bytes. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+    __type(key, u8);
+    __type(value, struct event);
+    __uint(max_entries, 1);
+    //__type(value, struct event);
+} event_heap SEC(".maps");
+#endif
 #endif
 
 #if USE_BPF_RINGBUF
@@ -193,10 +208,8 @@ struct renamedata___x {
 } __attribute__((preserve_access_index));
 
 #if USE_BPF_RINGBUF
-static __always_inline struct event* event_init(
-        u8 effect_type,
-        u8 path_type,
-        u64 timestamp)
+static __always_inline struct event*
+event_init(u8 effect_type, u8 path_type, u64 timestamp)
 {
     struct event* event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
     if (! event) {
@@ -215,24 +228,45 @@ static __always_inline struct event* event_init(
     return event;
 }
 #else
-static __always_inline struct event event_init(
+static __always_inline void event_fill_with_default_values(
+        struct event* event,
         u8 effect_type,
         u8 path_type,
         u64 timestamp)
 {
-    struct event event;
-    memset(&event, 0, sizeof(event));
+    memset(event, 0, sizeof(*event));
     u64 pid_tgid = bpf_get_current_pid_tgid();
     u32 pid = pid_tgid >> 32;  // A userspace "pid" is the kernel's "tgid"
     u32 tid = (u32)pid_tgid;   // And a "tid" is the kernel's "pid"
-    event.timestamp = timestamp;
-    event.buf_len = 0;
-    event.event_group_id = (u16)timestamp;
-    event.pid = pid;
-    event.effect_type = effect_type;
-    event.path_type = path_type;
+    event->timestamp = timestamp;
+    event->buf_len = 0;
+    event->event_group_id = (u16)timestamp;
+    event->pid = pid;
+    event->effect_type = effect_type;
+    event->path_type = path_type;
+}
+#if USE_FAKE_HEAP
+static __always_inline struct event*
+event_init(u8 effect_type, u8 path_type, u64 timestamp)
+{
+    static const u32 obligatory_key = 0;
+    struct event* event = bpf_map_lookup_elem(&event_heap, &obligatory_key);
+    if (! event) {
+        elog("Failed to lookup event heap");
+        return NULL;
+    }
+    event_fill_with_default_values(event, effect_type, path_type, timestamp);
     return event;
 }
+#else
+static __always_inline struct event*
+event_init(u8 effect_type, u8 path_type, u64 timestamp)
+{
+    struct event event;
+    event_init_heapless(&event, effect_type, path_type, timestamp);
+    return &event;
+}
+#endif
 #endif
 
 static __always_inline u8 path_type_from_mode(umode_t mode)
@@ -256,8 +290,7 @@ static __always_inline u8 path_type_from_mode(umode_t mode)
       - Others... to investigate.
     The mode will be read as 0 in those cases and we'll return PT_UNKNOWN.
 */
-static __always_inline u8
-path_type_from_dentry(struct dentry* dentry)
+static __always_inline u8 path_type_from_dentry(struct dentry* dentry)
 {
     struct inode* inode;
     umode_t mode;
@@ -349,8 +382,10 @@ static __always_inline u32 resolve_dents_to_events(
     ev_map_submit(event, last_event_submit_flags);
     return depth;
 #else
-    u8 path_type = guess_path_type == PT_UNKNOWN ? path_type_from_dentry(head) : guess_path_type;
-    struct event event = event_init(effect_type, path_type, timestamp);
+    u8 path_type = guess_path_type == PT_UNKNOWN ? path_type_from_dentry(head)
+                                                 : guess_path_type;
+    struct event* event = event_init(effect_type, path_type, timestamp);
+    if (! event) return 0;
     u8 depth = 0;
 #pragma unroll
     for (; depth < SUBPATH_DEPTH_MAX; ++depth) {
@@ -361,46 +396,57 @@ static __always_inline u32 resolve_dents_to_events(
         if (read_concrete(&head_name, &head->d_name)) return 0;
         if (read_concrete(&parent_name, &parent->d_name)) return 0;
         if (parent == head) {
-            tlog("Reached root at depth %d with name %s",
-                 depth,
-                 head_name.name);
+            // tlog("Reached root at depth %d with name %s",
+            //      depth,
+            //      head_name.name);
             break;
         }
         u8 clamped_head_name_len = head_name.len;
-// Evidently half of our NAME_MAX (which is the same as our PATH_MAX for the perf array, re. stack size). Why?
-#define BPF_VERIFIER_MAGIC_NUMBER 128
-        if (clamped_head_name_len > NAME_MAX - BPF_VERIFIER_MAGIC_NUMBER) {
+// Evidently half of our buffers are the "real" limit, according to the BPF
+// verifier. Why?
+#define NAME_MAX_REAL_MAX (NAME_MAX / 2)
+#define PATH_MAX_REAL_MAX (PATH_MAX / 2)
+        if (clamped_head_name_len > NAME_MAX_REAL_MAX) {
             // What's ever more strange, is that removing this log...
             wlog("Truncating path component to please BPF verifier");
-            clamped_head_name_len = NAME_MAX - BPF_VERIFIER_MAGIC_NUMBER;
+            clamped_head_name_len = NAME_MAX_REAL_MAX;
         }
-        if (event.buf_len > PATH_MAX - BPF_VERIFIER_MAGIC_NUMBER) {
+        if (event->buf_len > PATH_MAX_REAL_MAX) {
             // ... and/or this log will cause the verifier to fail.
             wlog("Truncating full path to please BPF verifier");
-            event.buf_len = PATH_MAX - BPF_VERIFIER_MAGIC_NUMBER;
+            event->buf_len = PATH_MAX_REAL_MAX;
         }
-        char* buf_at_next_path_offset = (char*)event.buf;
-        buf_at_next_path_offset += event.buf_len;
-        event.name_offsets[SUBPATH_DEPTH_MAX - depth - 1] = event.buf_len;
-        event.buf_len += clamped_head_name_len;
-        //tlog("event buf len: %d", event.buf_len);
-        if (read_len(buf_at_next_path_offset, clamped_head_name_len, head_name.name)) {
+        char* buf_at_next_path_offset = (char*)event->buf;
+        buf_at_next_path_offset += event->buf_len;
+        event->buf_len += clamped_head_name_len;
+        event->name_offsets[SUBPATH_DEPTH_MAX - depth - 1] = event->buf_len;
+        // tlog("event buf len: %d", event.buf_len);
+        if (read_len(
+                    buf_at_next_path_offset,
+                    clamped_head_name_len,
+                    head_name.name)) {
             elog("Failed to read dentry name");
             return 0;
         }
-        tlog("event buf len: %d, clamped head name len: %d, head name len: %d, head name: %s, event buf: %s",
-             event.buf_len,
+        tlog("event buf len: %d, clamped head name len: %d, head name len: %d, "
+             "head name: %s, event buf: %s",
+             event->buf_len,
              clamped_head_name_len,
              head_name.len,
              head_name.name,
-             event.buf);
-        if (event.buf_len + parent_name.len > PATH_MAX) {
+             event->buf);
+        if (event->buf_len + parent_name.len > PATH_MAX) {
             elog("Path too large, must truncate");
             break;
         }
         head = parent;
     }
-    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+    bpf_perf_event_output(
+            ctx,
+            &events,
+            BPF_F_CURRENT_CPU,
+            &event,
+            sizeof(*event));
     return 0;
 #endif
 }
@@ -554,17 +600,19 @@ int BPF_KPROBE(
             PT_UNKNOWN,
             timestamp,
             BPF_RB_NO_WAKEUP);
-#if USE_BPF_RINGBUF
     struct event* assoc = event_init(ET_LINK, PT_SYMLINK, timestamp);
     if (! assoc) return 0;
     u32 len = bpf_probe_read_str(assoc->buf, NAME_MAX, old_name);
     assoc->buf_len = len;
+#if USE_BPF_RINGBUF
     ev_map_submit(assoc, BPF_RB_FORCE_WAKEUP);
 #else
-    struct event assoc = event_init(ET_LINK, PT_SYMLINK, timestamp);
-    u32 len = bpf_probe_read_str(assoc.buf, NAME_MAX, old_name);
-    assoc.buf_len = len;
-    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &assoc, sizeof(assoc));
+    bpf_perf_event_output(
+            ctx,
+            &events,
+            BPF_F_CURRENT_CPU,
+            &assoc,
+            sizeof(assoc));
 #endif
     return 0;
 }

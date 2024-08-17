@@ -66,23 +66,27 @@ impl RawEvent {
     }
 
     // Name offsets come left-padded and then in reverse order:
-    //   [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20, 15, 9, 0]
+    //   [0.. snip .., 20, 15, 9]
     // We can parse those out with the offsets in the correct order:
-    //   [0, 9, 15, 20, 0..]
+    //   [9, 15, 20, 0..]
     // And return a list of pairs of offsets:
     //   [(0, 9), (9, 15), (15, 20)]
     #[cfg(feature = "ev-array")]
     fn reordered_name_offsets(&self) -> Vec<(u16, u16)> {
+        log::trace!("raw name offsets: {:?}", self.name_offsets);
         let mut reordered = Vec::with_capacity(64);
+        reordered.push((0, self.name_offsets[self.name_offsets.len() - 1] as u16));
         for idx in (1..self.name_offsets.len()).rev() {
+            let beg = self.name_offsets[idx] as u16;
             let end = self.name_offsets[idx - 1] as u16;
             if end == 0 {
                 log::trace!("idx: {idx}, @ end: {end}");
                 break;
-            } else {
-                let beg = self.name_offsets[idx] as u16;
+            } else if beg < end && end <= self.buf_len {
                 log::trace!("idx: {idx}, beg: {beg}, end: {end}");
                 reordered.push((beg, end));
+            } else {
+                log::error!("Invariant violated (beg < end && end <= buf_len) where beg: {beg}, end: {end}, buf_len: {}, idx: {idx}", self.buf_len);
             }
         }
         reordered.reverse();
@@ -94,13 +98,17 @@ impl RawEvent {
         let name_offsets = self.reordered_name_offsets();
         let buf = self.buf_as_bytes();
         let mut name = String::with_capacity(256);
-        for (beg, end) in name_offsets {
+        let push_path_component = |name: &mut String, beg, end| {
             let span = &buf[beg as usize..end as usize];
             let utf8 = std::str::from_utf8(span).unwrap();
+            log::trace!("(beg, end): ({beg}, {end}), utf8: {utf8}");
             name.push_str("/");
             name.push_str(utf8);
+        };
+        for (beg, end) in name_offsets {
+            push_path_component(&mut name, beg, end);
         }
-        log::trace!("raw name offsets: {:?}, raw buf: {:?}, name: {}", self.name_offsets, buf, name);
+        log::trace!("raw buf: {:?}, name: {name}", buf);
         name
     }
 }

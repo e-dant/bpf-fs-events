@@ -51,6 +51,21 @@ impl FsEvents<'_> {
         let mut skel = open_skel_interface()?;
         let mut maps = skel.maps_mut();
         let (tx, rx) = std::sync::mpsc::channel();
+        // Initialize the event "heap" with a dummy event
+        const EVENT_SZ: usize = std::mem::size_of::<watcher_types::event>();
+        let obligatory_keys_per_maphandle: Vec<u8> = vec![0u8; 1 as usize];
+        let dummy_events_percpu: Vec<Vec<u8>> = core::iter::repeat([0u8; EVENT_SZ])
+            .take(libbpf_rs::num_possible_cpus()?)
+            .map(|x| x.to_vec())
+            .collect();
+        maps.event_heap()
+            .update_percpu(
+                &obligatory_keys_per_maphandle,
+                &dummy_events_percpu,
+                libbpf_rs::MapFlags::ANY,
+            )
+            .unwrap();
+        maps.event_heap().freeze()?;
         #[cfg(feature = "ev-array")]
         {
             let on_event = ingest::accumulating_event_stream_proxy(tx);
